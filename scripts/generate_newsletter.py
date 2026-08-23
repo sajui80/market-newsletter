@@ -2,19 +2,20 @@
 Sang Joon의 오늘 경제 지표 - 뉴스레터 생성 및 발송 스크립트
 
 GitHub Actions에서 매일 정해진 시각(기본값: 인도시간 06:00 = UTC 00:30)에 실행되어
-1) yfinance로 지수/환율/관심종목 시세를 조회하고
-2) 인스타그램 카드뉴스 스타일의 HTML 이메일을 생성한 뒤
+1) yfinance로 지수/한국 주식/미국 주식/환율 시세를 조회하고
+2) 카드뉴스 스타일의 HTML 이메일을 생성한 뒤
 3) Gmail SMTP를 통해 발송한다.
 
 필요한 환경변수(GitHub Secrets):
 - GMAIL_ADDRESS       : 발신용 Gmail 주소
 - GMAIL_APP_PASSWORD  : Gmail 앱 비밀번호(2단계 인증 계정에서 발급)
-- RECIPIENT_EMAIL     : 수신 이메일 주소 (미지정 시 GMAIL_ADDRESS로 자기 자신에게 발송)
+- RECIPIENT_EMAIL     : 수신 이메일 주소 (콤마로 구분하면 여러 명에게 동시 발송, 미지정 시 GMAIL_ADDRESS로 자기 자신에게 발송)
 """
 
 import os
 import smtplib
 import sys
+import zlib
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from email.mime.multipart import MIMEMultipart
@@ -24,30 +25,42 @@ import yfinance as yf
 
 # ---------------------------------------------------------------------------
 # 1. 관심 종목/지수/환율 설정 — 필요 시 이 목록만 수정하면 됩니다.
+#    섹션 순서가 곧 발송되는 이메일의 배치 순서입니다.
 # ---------------------------------------------------------------------------
 
 # currency: "KRW"(원화 정수 표기) / "USD"(달러 소수점 2자리) / "PT"(지수 포인트) / "RATE"(환율)
+# icon: 뱃지에 표시할 1~2글자 약칭
 WATCHLIST = {
     "지수": [
-        {"label": "코스피", "ticker": "^KS11", "currency": "PT"},
-        {"label": "S&P 500", "ticker": "^GSPC", "currency": "PT"},
-        {"label": "나스닥", "ticker": "^IXIC", "currency": "PT"},
+        {"label": "KOSPI", "ticker": "^KS11", "currency": "PT", "icon": "KS"},
+        {"label": "S&P 500", "ticker": "^GSPC", "currency": "PT", "icon": "SP"},
+        {"label": "NASDAQ", "ticker": "^IXIC", "currency": "PT", "icon": "NQ"},
+    ],
+    "한국 주식": [
+        {"label": "삼성전자", "ticker": "005930.KS", "currency": "KRW", "icon": "삼성"},
+        {"label": "SK하이닉스", "ticker": "000660.KS", "currency": "KRW", "icon": "SK"},
+        {"label": "KODEX 200타겟위클리커버드콜", "ticker": "498400.KS", "currency": "KRW", "icon": "KDX"},
+        {"label": "현대차", "ticker": "005380.KS", "currency": "KRW", "icon": "현대"},
+        {"label": "삼성전기", "ticker": "009150.KS", "currency": "KRW", "icon": "삼전"},
+    ],
+    "미국 주식": [
+        {"label": "VOO", "ticker": "VOO", "currency": "USD", "icon": "VO"},
+        {"label": "QQQM", "ticker": "QQQM", "currency": "USD", "icon": "QM"},
+        {"label": "QLD", "ticker": "QLD", "currency": "USD", "icon": "QL"},
+        {"label": "TQQQ", "ticker": "TQQQ", "currency": "USD", "icon": "TQ"},
+        {"label": "SCHD", "ticker": "SCHD", "currency": "USD", "icon": "SC"},
+        {"label": "SOXL", "ticker": "SOXL", "currency": "USD", "icon": "SO"},
+        {"label": "QQQ", "ticker": "QQQ", "currency": "USD", "icon": "QQ"},
+        {"label": "NVDA", "ticker": "NVDA", "currency": "USD", "icon": "NV"},
+        {"label": "AAPL", "ticker": "AAPL", "currency": "USD", "icon": "AA"},
+        {"label": "TSLA", "ticker": "TSLA", "currency": "USD", "icon": "TS"},
+        {"label": "SPCX", "ticker": "SPCX", "currency": "USD", "icon": "SX"},
+        {"label": "GOOGL", "ticker": "GOOGL", "currency": "USD", "icon": "GO"},
     ],
     "환율": [
-        {"label": "원/달러 (USD/KRW)", "ticker": "KRW=X", "currency": "RATE"},
-        {"label": "원/루피 (INR/KRW)", "ticker": "INRKRW=X", "currency": "RATE",
+        {"label": "원/달러 (USD/KRW)", "ticker": "KRW=X", "currency": "RATE", "icon": "$"},
+        {"label": "원/루피 (INR/KRW)", "ticker": "INRKRW=X", "currency": "RATE", "icon": "₹",
          "fallback": {"numerator": "KRW=X", "denominator": "INR=X"}},
-    ],
-    "관심종목": [
-        {"label": "삼성전자", "ticker": "005930.KS", "currency": "KRW"},
-        {"label": "SK하이닉스", "ticker": "000660.KS", "currency": "KRW"},
-        {"label": "KODEX 200타겟위클리커버드콜", "ticker": "498400.KS", "currency": "KRW"},
-        {"label": "VOO", "ticker": "VOO", "currency": "USD"},
-        {"label": "QQQM", "ticker": "QQQM", "currency": "USD"},
-        {"label": "QLD", "ticker": "QLD", "currency": "USD"},
-        {"label": "TQQQ", "ticker": "TQQQ", "currency": "USD"},
-        {"label": "SCHD", "ticker": "SCHD", "currency": "USD"},
-        {"label": "SOXL", "ticker": "SOXL", "currency": "USD"},
     ],
 }
 
@@ -81,7 +94,7 @@ def _history_last_two_closes(ticker: str):
 
 
 def fetch_quote(item: dict):
-    """단일 종목/지수/환율 시세 조회. 실패 시 None 반환(카드에는 '데이터 없음' 표시)."""
+    """단일 종목/지수/환율 시세 조회. 실패 시 None 반환(해당 행에는 '데이터 없음' 표시)."""
     ticker = item["ticker"]
     try:
         quote = _history_last_two_closes(ticker)
@@ -121,42 +134,67 @@ def format_price(value: float, currency: str) -> str:
 
 
 def format_change(quote: Quote, currency: str) -> str:
-    sign = "+" if quote.change >= 0 else ""
+    sign = "+" if quote.change >= 0 else "-"
+    magnitude = abs(quote.change)
     if currency == "KRW":
-        change_str = f"{sign}{quote.change:,.0f}원"
+        change_str = f"{sign}{magnitude:,.0f}원"
     elif currency == "USD":
-        change_str = f"{sign}${quote.change:,.2f}"
+        change_str = f"{sign}${magnitude:,.2f}"
     elif currency == "RATE":
-        change_str = f"{sign}{quote.change:,.2f}원"
+        change_str = f"{sign}{magnitude:,.2f}원"
     else:
-        change_str = f"{sign}{quote.change:,.2f}"
-    return f"{change_str} ({sign}{quote.pct:.2f}%)"
+        change_str = f"{sign}{magnitude:,.2f}"
+    return f"{change_str} ({sign}{abs(quote.pct):.2f}%)"
 
 
 # ---------------------------------------------------------------------------
-# 4. 카드뉴스 스타일 HTML 생성
+# 4. 카드뉴스(리스트형) 스타일 HTML 생성
 # ---------------------------------------------------------------------------
 
-CARD_TEMPLATE = """
+# 뱃지 색상 팔레트 — 종목명을 해시하여 결정적으로 배정(동일 종목은 매일 같은 색)
+BADGE_COLORS = [
+    "#2f5fa8", "#c0392b", "#1f8a70", "#8e44ad", "#c77d24",
+    "#0f766e", "#a13d63", "#3b5b78", "#8a6d1e", "#4a4e69",
+]
+
+
+def _badge_color(label: str) -> str:
+    idx = zlib.crc32(label.encode("utf-8")) % len(BADGE_COLORS)
+    return BADGE_COLORS[idx]
+
+
+SECTION_OPEN_TEMPLATE = """
 <tr>
-  <td style="padding: 0 0 12px 0;">
-    <table role="presentation" width="100%%" cellpadding="0" cellspacing="0"
-           style="background:#ffffff; border:1px solid #eaeaea; border-radius:14px; overflow:hidden;">
+  <td style="padding:20px 0 0 0;">
+    <div style="font-size:13px; font-weight:700; letter-spacing:0.03em; color:#8a8a8a; padding:0 2px 10px;">%(title)s</div>
+    <div style="border:1px solid #eef0ec; border-radius:14px; overflow:hidden;">
+    <table role="presentation" width="100%%" cellpadding="0" cellspacing="0">
+"""
+
+SECTION_CLOSE_TEMPLATE = """
+    </table>
+    </div>
+  </td>
+</tr>
+"""
+
+# 짝수/홀수 행 배경 — 줄무늬로 가독성 확보
+ROW_BG_EVEN = "#ffffff"
+ROW_BG_ODD = "#f7f7f5"
+
+ROW_TEMPLATE = """
+<tr>
+  <td style="background:%(row_bg)s; padding:14px 14px;">
+    <table role="presentation" width="100%%" cellpadding="0" cellspacing="0">
       <tr>
-        <td style="width:6px; background:%(bar_color)s;"></td>
-        <td style="padding:16px 18px;">
-          <table role="presentation" width="100%%" cellpadding="0" cellspacing="0">
-            <tr>
-              <td style="font-size:13px; color:#8a8a8a; font-weight:600; letter-spacing:0.2px;">%(label)s</td>
-              <td align="right" style="font-size:13px; color:%(text_color)s; font-weight:700;">%(arrow)s %(pct)s%%</td>
-            </tr>
-            <tr>
-              <td colspan="2" style="padding-top:6px; font-size:24px; font-weight:800; color:#1a1a1a;">%(price)s</td>
-            </tr>
-            <tr>
-              <td colspan="2" style="padding-top:2px; font-size:13px; color:%(text_color)s;">%(change)s</td>
-            </tr>
-          </table>
+        <td width="22" style="vertical-align:middle; font-size:17px; font-weight:800; color:#c7cbc2;">%(number)s</td>
+        <td width="40" style="vertical-align:middle; padding-left:4px;">
+          <div style="width:34px; height:34px; border-radius:9px; background:%(badge_color)s; color:#ffffff; font-size:%(icon_size)s; font-weight:700; text-align:center; line-height:34px; font-family:'IBM Plex Sans KR', Arial, sans-serif;">%(icon)s</div>
+        </td>
+        <td style="vertical-align:middle; padding-left:10px; font-size:15.5px; font-weight:600; color:#1a1a1a;">%(label)s</td>
+        <td align="right" style="vertical-align:middle; white-space:nowrap;">
+          <div style="font-size:16px; font-weight:700; color:#1a1a1a;">%(price)s</div>
+          <div style="font-size:12.5px; font-weight:700; color:%(change_color)s; margin-top:2px;">%(change)s</div>
         </td>
       </tr>
     </table>
@@ -164,25 +202,20 @@ CARD_TEMPLATE = """
 </tr>
 """
 
-NO_DATA_CARD_TEMPLATE = """
+NO_DATA_ROW_TEMPLATE = """
 <tr>
-  <td style="padding: 0 0 12px 0;">
-    <table role="presentation" width="100%%" cellpadding="0" cellspacing="0"
-           style="background:#f7f7f7; border:1px dashed #cccccc; border-radius:14px;">
+  <td style="background:%(row_bg)s; padding:14px 14px;">
+    <table role="presentation" width="100%%" cellpadding="0" cellspacing="0">
       <tr>
-        <td style="padding:16px 18px;">
-          <div style="font-size:13px; color:#8a8a8a; font-weight:600;">%(label)s</div>
-          <div style="padding-top:6px; font-size:15px; color:#aaaaaa;">시세 조회 실패 — 다음 발송에서 재시도됩니다</div>
+        <td width="22" style="vertical-align:middle; font-size:17px; font-weight:800; color:#c7cbc2;">%(number)s</td>
+        <td width="40" style="vertical-align:middle; padding-left:4px;">
+          <div style="width:34px; height:34px; border-radius:9px; background:#eef0ec; color:#aaaaaa; font-size:%(icon_size)s; font-weight:700; text-align:center; line-height:34px;">%(icon)s</div>
         </td>
+        <td style="vertical-align:middle; padding-left:10px; font-size:15.5px; font-weight:600; color:#1a1a1a;">%(label)s</td>
+        <td align="right" style="vertical-align:middle; white-space:nowrap; font-size:12.5px; color:#aaaaaa;">조회 실패</td>
       </tr>
     </table>
   </td>
-</tr>
-"""
-
-SECTION_HEADER_TEMPLATE = """
-<tr>
-  <td style="padding:22px 0 10px 2px; font-size:15px; font-weight:800; color:#1a1a1a;">%(title)s</td>
 </tr>
 """
 
@@ -192,36 +225,53 @@ DOWN_COLOR = "#1a56db"
 FLAT_COLOR = "#8a8a8a"
 
 
-def render_card(item: dict, quote) -> str:
+def _icon_font_size(icon: str) -> str:
+    # 한글 2글자/영문 2글자는 작게, 1글자(통화 기호 등)는 크게
+    return "11px" if len(icon) >= 2 else "16px"
+
+
+def render_row(item: dict, quote, number: int) -> str:
+    row_bg = ROW_BG_EVEN if number % 2 == 1 else ROW_BG_ODD
+    icon = item.get("icon", item["label"][:2])
+
     if quote is None:
-        return NO_DATA_CARD_TEMPLATE % {"label": item["label"]}
+        return NO_DATA_ROW_TEMPLATE % {
+            "row_bg": row_bg,
+            "number": number,
+            "icon": icon,
+            "icon_size": _icon_font_size(icon),
+            "label": item["label"],
+        }
 
     currency = item["currency"]
     if quote.change > 0:
-        color, arrow = UP_COLOR, "▲"
+        color = UP_COLOR
     elif quote.change < 0:
-        color, arrow = DOWN_COLOR, "▼"
+        color = DOWN_COLOR
     else:
-        color, arrow = FLAT_COLOR, "―"
+        color = FLAT_COLOR
 
-    return CARD_TEMPLATE % {
-        "bar_color": color,
-        "text_color": color,
-        "arrow": arrow,
+    return ROW_TEMPLATE % {
+        "row_bg": row_bg,
+        "number": number,
+        "badge_color": _badge_color(item["label"]),
+        "icon": icon,
+        "icon_size": _icon_font_size(icon),
         "label": item["label"],
         "price": format_price(quote.price, currency),
         "change": format_change(quote, currency),
-        "pct": f"{abs(quote.pct):.2f}",
+        "change_color": color,
     }
 
 
 def build_email_html(sections: dict, today_str: str) -> str:
     body_rows = []
     for section_title, items in sections.items():
-        body_rows.append(SECTION_HEADER_TEMPLATE % {"title": section_title})
-        for item in items:
+        body_rows.append(SECTION_OPEN_TEMPLATE % {"title": section_title})
+        for i, item in enumerate(items):
             quote = fetch_quote(item)
-            body_rows.append(render_card(item, quote))
+            body_rows.append(render_row(item, quote, i + 1))
+        body_rows.append(SECTION_CLOSE_TEMPLATE)
 
     return f"""\
 <!doctype html>
@@ -237,7 +287,7 @@ def build_email_html(sections: dict, today_str: str) -> str:
       <td align="center" style="padding:24px 12px;">
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;">
           <tr>
-            <td style="padding:4px 4px 18px 4px;">
+            <td style="padding:4px 4px 4px 4px;">
               <div style="font-size:20px; font-weight:800; color:#1a1a1a;">Sang Joon의 오늘 경제 지표</div>
               <div style="font-size:13px; color:#8a8a8a; padding-top:4px;">{today_str} 기준</div>
             </td>
