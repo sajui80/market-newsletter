@@ -1,0 +1,29 @@
+name: Sang Joon Daily Market Newsletter
+
+on:
+  schedule:
+    # 매일 UTC 00:30 = 인도시간(IST) 06:00
+    - cron: "30 0 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  send-newsletter:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 저장소 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 설치
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 의존성 설치
+        run: pip install -r requirements.txt
+
+      - name: 뉴스레터 생성 및 발송
+        env:
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+        run: python scripts/generate_newsletter.py
