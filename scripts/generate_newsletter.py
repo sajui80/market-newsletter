@@ -262,20 +262,26 @@ def build_email_html(sections: dict, today_str: str) -> str:
 # 5. 이메일 발송
 # ---------------------------------------------------------------------------
 
+def _parse_recipients(raw: str) -> list:
+    """콤마(,)로 구분된 여러 수신 주소를 리스트로 변환. 세미콜론(;)도 허용."""
+    normalized = raw.replace(";", ",")
+    return [addr.strip() for addr in normalized.split(",") if addr.strip()]
+
+
 def send_email(html_body: str, subject: str) -> None:
     gmail_address = os.environ["GMAIL_ADDRESS"]
     gmail_app_password = os.environ["GMAIL_APP_PASSWORD"]
-    recipient = os.environ.get("RECIPIENT_EMAIL", gmail_address)
+    recipients = _parse_recipients(os.environ.get("RECIPIENT_EMAIL", gmail_address))
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = f"Sang Joon의 오늘 경제 지표 <{gmail_address}>"
-    msg["To"] = recipient
+    msg["To"] = ", ".join(recipients)
     msg.attach(MIMEText(html_body, "html", "utf-8"))
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
         server.login(gmail_address, gmail_app_password)
-        server.sendmail(gmail_address, [recipient], msg.as_string())
+        server.sendmail(gmail_address, recipients, msg.as_string())
 
 
 def main() -> None:
