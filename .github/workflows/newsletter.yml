@@ -1,9 +1,10 @@
 name: Sang Joon Daily Market Newsletter
 
 on:
-  schedule:
-    # 매일 UTC 00:30 = 인도시간(IST) 06:00
-    - cron: "30 0 * * *"
+  # GitHub Actions 자체 schedule(cron) 트리거는 내부 대기열 혼잡으로
+  # 실제 실행이 수십 분~수 시간 지연되는 경우가 있어(2026년 기준 알려진 이슈) 사용하지 않습니다.
+  # 대신 외부 스케줄러(cron-job.org 등)가 정해진 시각에 아래 workflow_dispatch를
+  # GitHub API로 직접 호출하여 실행합니다. (설정 가이드 8단계 참고)
   workflow_dispatch: {}
 
 jobs:
