@@ -12,6 +12,7 @@ GitHub Actions에서 매일 정해진 시각(기본값: 인도시간 06:00 = UTC
 - RECIPIENT_EMAIL     : 수신 이메일 주소 (콤마로 구분하면 여러 명에게 동시 발송, 미지정 시 GMAIL_ADDRESS로 자기 자신에게 발송)
 """
 
+import math
 import os
 import smtplib
 import sys
@@ -85,11 +86,19 @@ class Quote:
 
 
 def _history_last_two_closes(ticker: str):
-    hist = yf.Ticker(ticker).history(period="5d", interval="1d")
-    if hist.empty or len(hist) < 2:
+    hist = yf.Ticker(ticker).history(period="10d", interval="1d")
+    if hist.empty:
+        return None
+    # 발송 시각(인도시간 06:00 = 한국시간 09:30)은 한국 증시 개장 직후라,
+    # 당일 봉이 아직 종가 없이(NaN) 잡히는 경우가 있음 — 그런 행은 제외하고
+    # 실제로 종가가 확정된 마지막 두 거래일만 사용한다.
+    hist = hist.dropna(subset=["Close"])
+    if len(hist) < 2:
         return None
     price = float(hist["Close"].iloc[-1])
     prev = float(hist["Close"].iloc[-2])
+    if math.isnan(price) or math.isnan(prev):  # 이중 안전장치
+        return None
     return Quote(price=price, prev_close=prev)
 
 
